@@ -1,9 +1,9 @@
-import process from 'node:process'
+import { execa } from 'execa'
 import fs from 'fs-extra'
 import { resolve } from 'pathe'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { getWatcher } from '../src/watcher'
-import { getTestDir, readFile, runAsyncChildProcess, runCli, sleep, tempDir } from './utils'
+import { cli, getTestDir, readFile, runAsyncChildProcess, runCli, sleep, tempDir } from './utils'
 
 beforeAll(async () => {
   await fs.remove(tempDir)
@@ -98,31 +98,6 @@ describe('cli', () => {
     expect(transform).toMatchSnapshot()
   })
 
-  it.skipIf(process.version.startsWith('v20'))('uno.css exclude initialized class after changing file', async () => {
-    const { output, testDir } = await runCli({
-      'views/index.html': '<div class="bg-blue"></div>',
-    }, { args: ['--preset', 'wind3', '-w'] })
-
-    expect(output).toContain('.bg-blue')
-
-    const changedContent = '<div class="bg-red"></div>'
-    const absolutePathOfFile = resolve(testDir!, 'views/index.html')
-    await fs.writeFile(absolutePathOfFile, changedContent)
-
-    // polling until update
-
-    while (true) {
-      await sleep(100)
-      const output = await readFile(testDir!)
-      if (output.includes('.bg-red')) {
-        expect(output).toContain('.bg-red')
-        break
-      }
-    }
-
-    (await getWatcher()).close()
-  })
-
   it('supports unocss.config.js cli options', async () => {
     const testDir = getTestDir()
     const outFiles = ['./uno1.css', './test/uno2.css']
@@ -173,7 +148,106 @@ describe('cli', () => {
     expect(output2).toContain('.bg-red')
   })
 
-  it.skipIf(process.version.startsWith('v20'))('supports uno.config.ts changed rebuild', async () => {
+  it('should correctly deduplicate files of different types containing @media', async () => {
+    const { output, transform } = await runCli(
+      {
+        'views/index1.html': '<div class="lg:p-8"></div>',
+        'views/index2.html': '<div class="md:p-4"></div>',
+        'views/index3.html': '<div class="box"></div>',
+        'views/index.css': '.box { @apply pd-6 sm:p-2; }',
+        'unocss.config.js': `
+            import { defineConfig, presetWind3, transformerDirectives } from 'unocss'
+            export default defineConfig({
+              presets: [presetWind3()],
+              transformers: [transformerDirectives()]
+            })
+          `.trim(),
+      },
+      { transformFile: 'views/index.css', args: ['--rewrite'] },
+    )
+
+    expect(output).toMatchSnapshot()
+    expect(transform).toMatchSnapshot()
+  })
+
+  it('@unocss-skip uno.css', async () => {
+    const { output } = await runCli({
+      'views/index.html': `
+      <div class="p-4"></div>
+    // @unocss-skip-start
+      <div class="bg-red text-white"></div>
+    // @unocss-skip-end
+      <div className="w-10"></div>
+  `,
+    })
+
+    expect(output).toContain('.p-4')
+    expect(output).toContain('.w-10')
+    expect(output).not.toContain('.bg-red')
+    expect(output).not.toContain('.text-white')
+  })
+
+  it('keeps cli logs off stdout when writing generated css to stdout', async () => {
+    const testDir = getTestDir()
+    await fs.outputFile(resolve(testDir, 'views/index.html'), '<div class="bg-black"></div>', 'utf8')
+
+    const { stdout, stderr } = await execa(
+      'pnpm',
+      [
+        'exec',
+        'tsx',
+        cli,
+        resolve(testDir, 'views/index.html'),
+        '--stdout',
+        '--preset',
+        'wind4',
+        '--preflights',
+        'false',
+      ],
+      {
+        env: {
+          NODE_ENV: 'development',
+          TEST: 'false',
+          VITEST: 'false',
+        },
+      },
+    )
+
+    expect(stdout).toContain('.bg-black')
+    expect(stdout).not.toContain('UnoCSS v')
+    expect(stdout).not.toContain('UnoCSS for production')
+    expect(stderr).toContain('UnoCSS v')
+    expect(stderr).toContain('UnoCSS for production')
+  })
+})
+
+describe.skipIf(process.version.startsWith('v20'))('cli watch mode', () => {
+  it('uno.css exclude initialized class after changing file', async () => {
+    const { output, testDir } = await runCli({
+      'views/index.html': '<div class="bg-blue"></div>',
+    }, { args: ['-w'] })
+
+    expect(output).toContain('.bg-blue')
+
+    const changedContent = '<div class="bg-red"></div>'
+    const absolutePathOfFile = resolve(testDir!, 'views/index.html')
+    await fs.writeFile(absolutePathOfFile, changedContent)
+
+    // polling until update
+
+    while (true) {
+      await sleep(100)
+      const output = await readFile(testDir!)
+      if (output.includes('.bg-red')) {
+        expect(output).toContain('.bg-red')
+        break
+      }
+    }
+
+    (await getWatcher()).close()
+  })
+
+  it('supports uno.config.ts changed rebuild', async () => {
     const { output, testDir } = await runCli({
       'views/index.html': '<div class="bg-foo"></div>',
       'uno.config.ts': `
@@ -212,44 +286,5 @@ describe('cli', () => {
     }
 
     (await getWatcher()).close()
-  })
-
-  it('should correctly deduplicate files of different types containing @media', async () => {
-    const { output, transform } = await runCli(
-      {
-        'views/index1.html': '<div class="lg:p-8"></div>',
-        'views/index2.html': '<div class="md:p-4"></div>',
-        'views/index3.html': '<div class="box"></div>',
-        'views/index.css': '.box { @apply pd-6 sm:p-2; }',
-        'unocss.config.js': `
-            import { defineConfig, presetWind3, transformerDirectives } from 'unocss'
-            export default defineConfig({
-              presets: [presetWind3()],
-              transformers: [transformerDirectives()]
-            })
-          `.trim(),
-      },
-      { transformFile: 'views/index.css', args: ['--rewrite'] },
-    )
-
-    expect(output).toMatchSnapshot()
-    expect(transform).toMatchSnapshot()
-  })
-
-  it('@unocss-skip uno.css', async () => {
-    const { output } = await runCli({
-      'views/index.html': `
-      <div class="p-4"></div>
-    // @unocss-skip-start
-      <div class="bg-red text-white"></div>
-    // @unocss-skip-end
-      <div className="w-10"></div>
-  `,
-    })
-
-    expect(output).toContain('.p-4')
-    expect(output).toContain('.w-10')
-    expect(output).not.toContain('.bg-red')
-    expect(output).not.toContain('.text-white')
   })
 })
